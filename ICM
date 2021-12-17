@@ -1,0 +1,318 @@
+#include <Adafruit_ICM20X.h>
+#include <Adafruit_ICM20948.h>
+#include <Adafruit_Sensor.h>
+#include <Wire.h>
+#include <WiFi.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
+
+//Defines boundaries and times
+#define MAX_ANGLE 90
+#define MIN_ANGLE 0
+#define MAX_AKS_FROM_ERTH 9.81
+#define SLEEP_TIME_S 5
+#define S_FACTOR 1000000
+#define DELAY_TIME 20
+
+//ICM20948
+Adafruit_ICM20948 icm;
+
+// Defines variables
+int i = 0;
+int tests = 20;
+int aks_count = 0;
+int movingPin = 33;
+int redLed = 17;
+int greenLed = 16;
+bool moving;
+ 
+float aks_x;
+float aks_y;
+float aks_z;
+
+float aks_t_x = 0;
+float aks_t_y = 0;
+float aks_t_z = 0;
+
+float aks_avg_x = 0;
+float aks_avg_y = 0;
+float aks_avg_z = 0;
+
+float angle_x;
+float angle_y;
+
+unsigned long t_start;
+unsigned long t_stop;
+unsigned long test_time;
+unsigned long time_now_d1;
+unsigned long time_now_d2;
+////////////////////////////////////////////////////////////////////////////////////////////
+// ESPNOW
+// Syntax for ESPNow from 
+// https://microcontrollerslab.com/esp32-esp-now-wi-fi-web-server/?fbclid=IwAR2T3Tl_KNdaejHN0L46BRSrD-_tMjHOgj9mopRmdKIp1dzrPvLBlZeRYtA#ESP32_ESP-Now_Transmitter_Schematic_and_Arduino_Sketch
+// and modified to fit this program
+// M: 0x24, 0x6F, 0x28, 0x36, 0x60, 0x70
+// T: 0xAC, 0x67, 0xB2, 0x38, 0x4C, 0x28
+uint8_t broadcastAddress[] = {0xAC, 0x67, 0xB2, 0x38, 0x4C, 0x28};
+const char *SSID_AP = "boaty";
+
+// Defines variables that will be sendt wiht ESPNow
+typedef struct struct_message {
+  char node[32];
+  int id;
+  bool a;
+} struct_message;
+
+struct_message myData;
+
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.print("\r\nLast Packet Send Status:\t");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+}
+////////////////////////////////////////////////////////////////////////////////////////////
+
+void setup() {
+  t_start = millis();
+  Serial.begin(115200);
+  pinMode(movingPin, INPUT);
+  pinMode(redLed, OUTPUT);
+  pinMode(greenLed, OUTPUT);
+////////////////////////////////////////////////////////////////////////////////////////////
+
+  // ESPNOW SETUP
+  // syntax from
+  // https://microcontrollerslab.com/esp32-esp-now-wi-fi-web-server/?fbclid=IwAR2T3Tl_KNdaejHN0L46BRSrD-_tMjHOgj9mopRmdKIp1dzrPvLBlZeRYtA#ESP32_ESP-Now_Transmitter_Schematic_and_Arduino_Sketch
+  // modified to fit this program
+  WiFi.mode(WIFI_STA);
+  int32_t channel = 6;
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(false);
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error tilkobling ESP-NOW");
+    return;
+  }
+
+  esp_now_register_send_cb(OnDataSent);
+
+  esp_now_peer_info_t peerInfo;
+  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+  peerInfo.encrypt = false;       
+  if (esp_now_add_peer(&peerInfo) != ESP_OK){
+    Serial.println("Failed to add peer");
+    return;
+  }
+////////////////////////////////////////////////////////////////////////////////////////////
+
+//ICM20948 SETUP
+/* this part of the setup code is taken from test adafruit_icm20948_test included as sample code
+    to Adafruit_ICM20X library */
+  Serial.println("Adafruit ICM20948 test!");
+// 0x68 is the I2C address for the sensor
+  if (!icm.begin_I2C(0x68)) {
+    Serial.println("Failed to find ICM20948 chip");
+    while (1) {
+      delay(100);
+    }
+  }
+  Serial.println("ICM20948 Found!");
+
+  // finds accelerometer range
+  icm.setAccelRange(ICM20948_ACCEL_RANGE_16_G);
+  Serial.print("Accelerometer range set to: ");
+  switch (icm.getAccelRange()) {
+  case ICM20948_ACCEL_RANGE_2_G:
+    Serial.println("+-2G");
+    break;
+  case ICM20948_ACCEL_RANGE_4_G:
+    Serial.println("+-4G");
+    break;
+  case ICM20948_ACCEL_RANGE_8_G:
+    Serial.println("+-8G");
+    break;
+  case ICM20948_ACCEL_RANGE_16_G:
+    Serial.println("+-16G");
+    break;
+  }
+  Serial.println("OK");
+
+  // finds gyroscope range
+  /*
+  Serial.print("Gyro range set to: ");
+  switch (icm.getGyroRange()) {
+  case ICM20948_GYRO_RANGE_250_DPS:
+    Serial.println("250 degrees/s");
+    break;
+  case ICM20948_GYRO_RANGE_500_DPS:
+    Serial.println("500 degrees/s");
+    break;
+  case ICM20948_GYRO_RANGE_1000_DPS:
+    Serial.println("1000 degrees/s");
+    break;
+  case ICM20948_GYRO_RANGE_2000_DPS:
+    Serial.println("2000 degrees/s");
+    break;
+  }*/
+
+  uint16_t accel_divisor = icm.getAccelRateDivisor();
+  float accel_rate = 1125 / (1.0 + accel_divisor);
+
+  Serial.print("Accelerometer data rate divisor set to: ");
+  Serial.println(accel_divisor);
+  Serial.print("Accelerometer data rate (Hz) is approximately: ");
+  Serial.println(accel_rate);
+  /*
+  uint8_t gyro_divisor = icm.getGyroRateDivisor();
+  float gyro_rate = 1100 / (1.0 + gyro_divisor);
+
+  Serial.print("Gyro data rate divisor set to: ");
+  Serial.println(gyro_divisor);
+  Serial.print("Gyro data rate (Hz) is approximately: ");
+  Serial.println(gyro_rate);*/
+
+ /* Serial.print("Magnetometer data rate set to: ");
+  switch (icm.getMagDataRate()) {
+  case AK09916_MAG_DATARATE_SHUTDOWN:
+    Serial.println("Shutdown");
+    break;
+  case AK09916_MAG_DATARATE_SINGLE:
+    Serial.println("Single/One shot");
+    break;
+  case AK09916_MAG_DATARATE_10_HZ:
+    Serial.println("10 Hz");
+    break;
+  case AK09916_MAG_DATARATE_20_HZ:
+    Serial.println("20 Hz");
+    break;
+  case AK09916_MAG_DATARATE_50_HZ:
+    Serial.println("50 Hz");
+    break;
+  case AK09916_MAG_DATARATE_100_HZ:
+    Serial.println("100 Hz");
+    break;
+  }*/
+  }
+
+void loop() {
+  moving = digitalRead(movingPin);
+  time_now_d1=0;
+  i = 0;
+  aks_count = 0;
+  aks_t_x = 0;
+  aks_t_y = 0;
+  aks_t_z = 0;
+  
+  sensors_event_t accel;
+  sensors_event_t gyro;
+  sensors_event_t mag;
+  sensors_event_t temp;
+////////////////////////////////////////////////////////////////////////////////////////////
+
+  // Enters deep sleep if boat is moving
+  if (moving == true){
+    // wakes up if pin 33 gets 0 "boat is not moving".
+    esp_sleep_enable_ext0_wakeup(GPIO_NUM_33,0);
+    Serial.println("Going to sleep until boat stops");
+    esp_deep_sleep_start();
+  }
+////////////////////////////////////////////////////////////////////////////////////////////
+
+  // Enters deep sleep if boat is not moving
+  if (moving == false){
+    for (i = 0; i <= tests; i++) {
+      icm.getEvent(&accel, &gyro, &temp, &mag);
+      aks_x = accel.acceleration.x;
+      aks_y = accel.acceleration.y;
+      aks_z = accel.acceleration.z;
+      
+      if (abs(aks_x) < 10.5 && abs(aks_y) < 10.5 && abs(aks_z) < 10.5 && millis() >= time_now_d1 + DELAY_TIME){
+        aks_t_x = aks_t_x + aks_x;
+        aks_t_y = aks_t_y + aks_y;
+        aks_t_z = aks_t_z + aks_z;
+        aks_count++;
+        time_now_d1 = millis();
+        // breaks out of current loop if boat is moving
+        moving = digitalRead(movingPin);
+        if(moving == 1){
+          break;
+        }
+      }
+      // makes sure that there are enouth measurements
+      if(aks_count < tests){
+        i = aks_count;
+      }
+    }
+  }
+////////////////////////////////////////////////////////////////////////////////////////////
+
+  // calculates the acceleration vector
+  aks_avg_x = aks_t_x/aks_count;
+  aks_avg_y = aks_t_y/aks_count;
+  aks_avg_z = aks_t_z/aks_count;
+
+  /* convert angles of inclination based on axis vector. 
+  negative x angle = tilt to the right / starboard 
+  negative y angle = tilt forward  */
+  angle_x = (aks_avg_x/MAX_AKS_FROM_ERTH)*(MAX_ANGLE-MIN_ANGLE);
+  angle_y = (aks_avg_y/MAX_AKS_FROM_ERTH)*(MAX_ANGLE-MIN_ANGLE);
+
+  Serial.println(String(angle_x) + "degrees");
+  Serial.println(String(angle_y) + "degrees");
+  
+////////////////////////////////////////////////////////////////////////////////////////////
+  // ESPNOW
+  // Setting alarm variable "myData.a" true of false based on angle
+  if(abs(angle_x) > 20 || abs(angle_y) > 20){
+    myData.a = true;
+    digitalWrite(redLed, HIGH);
+  }
+  else {
+    digitalWrite(greenLed, HIGH);
+    myData.a = false;
+  }
+  
+  // Sets node id and alarm variable
+  strcpy(myData.node, "ICM20948 a=x-axis b=y-axis");
+  myData.id = 1;
+  myData.a;
+////////////////////////////////////////////////////////////////////////////////////////////
+
+  // Sends no alarm to slave
+  if(myData.a == false){
+    esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
+
+    if (result == ESP_OK) {
+      Serial.println("Sent with success");
+    }
+    else {
+      Serial.println("Error sending the data");
+    }
+
+    delay(DELAY_TIME*2); //needed to get delivery status in serial monitor
+    // Finds active time
+    t_stop = millis();
+    test_time = (t_stop - t_start);
+    Serial.println("code used " + String(test_time) + "ms");
+    
+    esp_sleep_enable_timer_wakeup(SLEEP_TIME_S * S_FACTOR);
+    digitalWrite(greenLed, LOW);
+    Serial.println("Going to sleep for 5s");
+    esp_deep_sleep_start();
+  }
+////////////////////////////////////////////////////////////////////////////////////////////
+
+  // sends alarm to slave
+  if(myData.a == true) {
+    esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
+
+    if (result == ESP_OK) {
+      Serial.println("Sent with success");
+    }
+    else {
+      Serial.println("Error sending the data");
+    }
+    delay(DELAY_TIME*5); //needed to get delivery status in serial monitor
+    digitalWrite(redLed, LOW);
+  }
+}
